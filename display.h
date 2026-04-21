@@ -11,21 +11,21 @@ static inline uint8_t rgb332(uint8_t r, uint8_t g, uint8_t b) {
     return (r & 0xE0) | ((g & 0xE0) >> 3) | (b >> 6);
 }
 
-#define COLOR_BLACK     rgb332(0,   0,   0)
-#define COLOR_WHITE     rgb332(255, 255, 255)
-#define COLOR_RED       rgb332(255, 0,   0)
-#define COLOR_GREEN     rgb332(0,   255, 0)
-#define COLOR_BLUE      rgb332(0,   0,   255)
-#define COLOR_YELLOW    rgb332(255, 255, 0)
-#define COLOR_CYAN      rgb332(0,   255, 255)
-#define COLOR_MAGENTA   rgb332(255, 0,   255)
-#define COLOR_GRAY      rgb332(128, 128, 128)
+#define COLOR_BLACK rgb332(0,   0,   0)
+#define COLOR_WHITE rgb332(255, 255, 255)
+#define COLOR_RED rgb332(255, 0,   0)
+#define COLOR_GREEN rgb332(0,   255, 0)
+#define COLOR_BLUE rgb332(0,   0,   255)
+#define COLOR_YELLOW rgb332(255, 255, 0)
+#define COLOR_CYAN rgb332(0,   255, 255)
+#define COLOR_MAGENTA rgb332(255, 0,   255)
+#define COLOR_GRAY rgb332(128, 128, 128)
 #define COLOR_DARK_GRAY rgb332(64,  64,  64)
-#define COLOR_ORANGE    rgb332(255, 165, 0)
+#define COLOR_ORANGE rgb332(255, 165, 0)
 
 typedef enum {
     DISPLAY_MODE_HANDHELD,  
-    DISPLAY_MODE_DOCKED      
+    DISPLAY_MODE_DOCKED
 } DisplayMode;
 
 void display_init(void);

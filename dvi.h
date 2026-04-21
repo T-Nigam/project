@@ -22,13 +22,9 @@
 #define DVI_V_TOTAL_LINES (DVI_V_FRONT_PORCH + DVI_V_SYNC_WIDTH + DVI_V_BACK_PORCH + DVI_V_ACTIVE_LINES)
 
 void dvi_init(void);
-
 void dvi_start(void);
-
 void dvi_stop(void);
-
 void dvi_set_display_buffer(uint8_t *buf);
-
 bool dvi_vsync_occurred(void);
 
 #endif 
