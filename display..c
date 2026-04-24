@@ -1,0 +1,378 @@
+// ============================================================
+// display.c
+// Framebuffer management and all drawing functions.
+// Sits between the game code and the DVI/TFT hardware layers.
+// ============================================================
+
+#include "display.h"
+#include "dvi.h"
+#include "pico/stdlib.h"
+#include <string.h>
+
+// ------------------------------------------------------------
+// Framebuffers
+// Two buffers for double buffering - game draws into back,
+// DMA reads from front. They swap at vsync.
+// ------------------------------------------------------------
+static uint8_t framebuffer_a[SCREEN_WIDTH * SCREEN_HEIGHT];
+static uint8_t framebuffer_b[SCREEN_WIDTH * SCREEN_HEIGHT];
+
+static uint8_t *frame_back    = framebuffer_a; // game draws here
+static uint8_t *frame_display = framebuffer_b; // DMA reads here
+
+// Pending flip flag - set by display_flip(), cleared by vsync IRQ
+static volatile bool flip_pending = false;
+
+// ------------------------------------------------------------
+// 8x8 bitmap font
+// Each character is 8 bytes, one byte per row, MSB = leftmost pixel
+// ASCII 32 (space) through 127, stored as font_data[char - 32][row]
+// ------------------------------------------------------------
+static const uint8_t font_data[96][8] = {
+    {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00}, // space
+    {0x18,0x3C,0x3C,0x18,0x18,0x00,0x18,0x00}, // !
+    {0x36,0x36,0x00,0x00,0x00,0x00,0x00,0x00}, // "
+    {0x36,0x36,0x7F,0x36,0x7F,0x36,0x36,0x00}, // #
+    {0x0C,0x3E,0x03,0x1E,0x30,0x1F,0x0C,0x00}, // $
+    {0x00,0x63,0x33,0x18,0x0C,0x66,0x63,0x00}, // %
+    {0x1C,0x36,0x1C,0x6E,0x3B,0x33,0x6E,0x00}, // &
+    {0x06,0x06,0x03,0x00,0x00,0x00,0x00,0x00}, // '
+    {0x18,0x0C,0x06,0x06,0x06,0x0C,0x18,0x00}, // (
+    {0x06,0x0C,0x18,0x18,0x18,0x0C,0x06,0x00}, // )
+    {0x00,0x66,0x3C,0xFF,0x3C,0x66,0x00,0x00}, // *
+    {0x00,0x0C,0x0C,0x3F,0x0C,0x0C,0x00,0x00}, // +
+    {0x00,0x00,0x00,0x00,0x00,0x0C,0x0C,0x06}, // ,
+    {0x00,0x00,0x00,0x3F,0x00,0x00,0x00,0x00}, // -
+    {0x00,0x00,0x00,0x00,0x00,0x0C,0x0C,0x00}, // .
+    {0x60,0x30,0x18,0x0C,0x06,0x03,0x01,0x00}, // /
+    {0x3E,0x63,0x73,0x7B,0x6F,0x67,0x3E,0x00}, // 0
+    {0x0C,0x0E,0x0C,0x0C,0x0C,0x0C,0x3F,0x00}, // 1
+    {0x1E,0x33,0x30,0x1C,0x06,0x33,0x3F,0x00}, // 2
+    {0x1E,0x33,0x30,0x1C,0x30,0x33,0x1E,0x00}, // 3
+    {0x38,0x3C,0x36,0x33,0x7F,0x30,0x78,0x00}, // 4
+    {0x3F,0x03,0x1F,0x30,0x30,0x33,0x1E,0x00}, // 5
+    {0x1C,0x06,0x03,0x1F,0x33,0x33,0x1E,0x00}, // 6
+    {0x3F,0x33,0x30,0x18,0x0C,0x0C,0x0C,0x00}, // 7
+    {0x1E,0x33,0x33,0x1E,0x33,0x33,0x1E,0x00}, // 8
+    {0x1E,0x33,0x33,0x3E,0x30,0x18,0x0E,0x00}, // 9
+    {0x00,0x0C,0x0C,0x00,0x00,0x0C,0x0C,0x00}, // :
+    {0x00,0x0C,0x0C,0x00,0x00,0x0C,0x0C,0x06}, // ;
+    {0x18,0x0C,0x06,0x03,0x06,0x0C,0x18,0x00}, // <
+    {0x00,0x00,0x3F,0x00,0x00,0x3F,0x00,0x00}, // =
+    {0x06,0x0C,0x18,0x30,0x18,0x0C,0x06,0x00}, // >
+    {0x1E,0x33,0x30,0x18,0x0C,0x00,0x0C,0x00}, // ?
+    {0x3E,0x63,0x7B,0x7B,0x7B,0x03,0x1E,0x00}, // @
+    {0x0C,0x1E,0x33,0x33,0x3F,0x33,0x33,0x00}, // A
+    {0x3F,0x66,0x66,0x3E,0x66,0x66,0x3F,0x00}, // B
+    {0x3C,0x66,0x03,0x03,0x03,0x66,0x3C,0x00}, // C
+    {0x1F,0x36,0x66,0x66,0x66,0x36,0x1F,0x00}, // D
+    {0x7F,0x46,0x16,0x1E,0x16,0x46,0x7F,0x00}, // E
+    {0x7F,0x46,0x16,0x1E,0x16,0x06,0x0F,0x00}, // F
+    {0x3C,0x66,0x03,0x03,0x73,0x66,0x7C,0x00}, // G
+    {0x33,0x33,0x33,0x3F,0x33,0x33,0x33,0x00}, // H
+    {0x1E,0x0C,0x0C,0x0C,0x0C,0x0C,0x1E,0x00}, // I
+    {0x78,0x30,0x30,0x30,0x33,0x33,0x1E,0x00}, // J
+    {0x67,0x66,0x36,0x1E,0x36,0x66,0x67,0x00}, // K
+    {0x0F,0x06,0x06,0x06,0x46,0x66,0x7F,0x00}, // L
+    {0x63,0x77,0x7F,0x7F,0x6B,0x63,0x63,0x00}, // M
+    {0x63,0x67,0x6F,0x7B,0x73,0x63,0x63,0x00}, // N
+    {0x1C,0x36,0x63,0x63,0x63,0x36,0x1C,0x00}, // O
+    {0x3F,0x66,0x66,0x3E,0x06,0x06,0x0F,0x00}, // P
+    {0x1E,0x33,0x33,0x33,0x3B,0x1E,0x38,0x00}, // Q
+    {0x3F,0x66,0x66,0x3E,0x36,0x66,0x67,0x00}, // R
+    {0x1E,0x33,0x07,0x0E,0x38,0x33,0x1E,0x00}, // S
+    {0x3F,0x2D,0x0C,0x0C,0x0C,0x0C,0x1E,0x00}, // T
+    {0x33,0x33,0x33,0x33,0x33,0x33,0x3F,0x00}, // U
+    {0x33,0x33,0x33,0x33,0x33,0x1E,0x0C,0x00}, // V
+    {0x63,0x63,0x63,0x6B,0x7F,0x77,0x63,0x00}, // W
+    {0x63,0x63,0x36,0x1C,0x1C,0x36,0x63,0x00}, // X
+    {0x33,0x33,0x33,0x1E,0x0C,0x0C,0x1E,0x00}, // Y
+    {0x7F,0x63,0x31,0x18,0x4C,0x66,0x7F,0x00}, // Z
+    {0x1E,0x06,0x06,0x06,0x06,0x06,0x1E,0x00}, // [
+    {0x03,0x06,0x0C,0x18,0x30,0x60,0x40,0x00}, // backslash
+    {0x1E,0x18,0x18,0x18,0x18,0x18,0x1E,0x00}, // ]
+    {0x08,0x1C,0x36,0x63,0x00,0x00,0x00,0x00}, // ^
+    {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xFF}, // _
+    {0x0C,0x0C,0x18,0x00,0x00,0x00,0x00,0x00}, // `
+    {0x00,0x00,0x1E,0x30,0x3E,0x33,0x6E,0x00}, // a
+    {0x07,0x06,0x06,0x3E,0x66,0x66,0x3B,0x00}, // b
+    {0x00,0x00,0x1E,0x33,0x03,0x33,0x1E,0x00}, // c
+    {0x38,0x30,0x30,0x3e,0x33,0x33,0x6E,0x00}, // d
+    {0x00,0x00,0x1E,0x33,0x3f,0x03,0x1E,0x00}, // e
+    {0x1C,0x36,0x06,0x0f,0x06,0x06,0x0F,0x00}, // f
+    {0x00,0x00,0x6E,0x33,0x33,0x3E,0x30,0x1F}, // g
+    {0x07,0x06,0x36,0x6E,0x66,0x66,0x67,0x00}, // h
+    {0x0C,0x00,0x0E,0x0C,0x0C,0x0C,0x1E,0x00}, // i
+    {0x30,0x00,0x30,0x30,0x30,0x33,0x33,0x1E}, // j
+    {0x07,0x06,0x66,0x36,0x1E,0x36,0x67,0x00}, // k
+    {0x0E,0x0C,0x0C,0x0C,0x0C,0x0C,0x1E,0x00}, // l
+    {0x00,0x00,0x33,0x7F,0x7F,0x6B,0x63,0x00}, // m
+    {0x00,0x00,0x1F,0x33,0x33,0x33,0x33,0x00}, // n
+    {0x00,0x00,0x1E,0x33,0x33,0x33,0x1E,0x00}, // o
+    {0x00,0x00,0x3B,0x66,0x66,0x3E,0x06,0x0F}, // p
+    {0x00,0x00,0x6E,0x33,0x33,0x3E,0x30,0x78}, // q
+    {0x00,0x00,0x3B,0x6E,0x66,0x06,0x0F,0x00}, // r
+    {0x00,0x00,0x3E,0x03,0x1E,0x30,0x1F,0x00}, // s
+    {0x08,0x0C,0x3E,0x0C,0x0C,0x2C,0x18,0x00}, // t
+    {0x00,0x00,0x33,0x33,0x33,0x33,0x6E,0x00}, // u
+    {0x00,0x00,0x33,0x33,0x33,0x1E,0x0C,0x00}, // v
+    {0x00,0x00,0x63,0x6B,0x7F,0x7F,0x36,0x00}, // w
+    {0x00,0x00,0x63,0x36,0x1C,0x36,0x63,0x00}, // x
+    {0x00,0x00,0x33,0x33,0x33,0x3E,0x30,0x1F}, // y
+    {0x00,0x00,0x3F,0x19,0x0C,0x26,0x3F,0x00}, // z
+    {0x38,0x0C,0x0C,0x07,0x0C,0x0C,0x38,0x00}, // {
+    {0x18,0x18,0x18,0x00,0x18,0x18,0x18,0x00}, // |
+    {0x07,0x0C,0x0C,0x38,0x0C,0x0C,0x07,0x00}, // }
+    {0x6E,0x3B,0x00,0x00,0x00,0x00,0x00,0x00}, // ~
+    {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF}, // DEL (filled block)
+};
+
+// ============================================================
+// display_init
+// ============================================================
+void display_init(void) {
+    // Clear both buffers to black
+    memset(framebuffer_a, COLOR_BLACK, sizeof(framebuffer_a));
+    memset(framebuffer_b, COLOR_BLACK, sizeof(framebuffer_b));
+
+    frame_back    = framebuffer_a;
+    frame_display = framebuffer_b;
+    flip_pending  = false;
+
+    // Initialize DVI hardware
+    dvi_init();
+    dvi_set_display_buffer(frame_display);
+    dvi_start();
+}
+
+// ============================================================
+// display_clear
+// Fill the back buffer with a solid color
+// ============================================================
+void display_clear(uint8_t color) {
+    memset(frame_back, color, SCREEN_WIDTH * SCREEN_HEIGHT);
+}
+
+// ============================================================
+// display_flip
+// Queue a buffer swap and block until vsync happens
+// ============================================================
+void display_flip(void) {
+    // Wait for vsync
+    while (!dvi_vsync_occurred()) {
+        __wfi(); // sleep until next interrupt
+    }
+
+    // Swap the pointers
+    uint8_t *tmp  = frame_display;
+    frame_display = frame_back;
+    frame_back    = tmp;
+
+    // Tell DVI to read from the new display buffer
+    dvi_set_display_buffer(frame_display);
+}
+
+// ============================================================
+// display_is_docked
+// ============================================================
+bool display_is_docked(void) {
+    return gpio_get(DOCK_DETECT_PIN);
+}
+
+// ============================================================
+// display_get_back_buffer
+// ============================================================
+uint8_t *display_get_back_buffer(void) {
+    return frame_back;
+}
+
+// ============================================================
+// draw_pixel
+// Bounds-checked single pixel write into back buffer
+// ============================================================
+void draw_pixel(int x, int y, uint8_t color) {
+    if (x < 0 || x >= SCREEN_WIDTH || y < 0 || y >= SCREEN_HEIGHT) return;
+    frame_back[y * SCREEN_WIDTH + x] = color;
+}
+
+// ============================================================
+// draw_rect
+// Filled rectangle
+// ============================================================
+void draw_rect(int x, int y, int w, int h, uint8_t color) {
+    // Clamp to screen bounds
+    int x0 = x < 0 ? 0 : x;
+    int y0 = y < 0 ? 0 : y;
+    int x1 = (x + w) > SCREEN_WIDTH  ? SCREEN_WIDTH  : (x + w);
+    int y1 = (y + h) > SCREEN_HEIGHT ? SCREEN_HEIGHT : (y + h);
+
+    for (int row = y0; row < y1; row++) {
+        memset(&frame_back[row * SCREEN_WIDTH + x0], color, x1 - x0);
+    }
+}
+
+// ============================================================
+// draw_rect_outline
+// Rectangle border only
+// ============================================================
+void draw_rect_outline(int x, int y, int w, int h, uint8_t color) {
+    draw_hline(x,         y,         w, color); // top
+    draw_hline(x,         y + h - 1, w, color); // bottom
+    draw_vline(x,         y,         h, color); // left
+    draw_vline(x + w - 1, y,         h, color); // right
+}
+
+// ============================================================
+// draw_hline
+// Horizontal line - uses memset so it is very fast
+// ============================================================
+void draw_hline(int x, int y, int w, uint8_t color) {
+    if (y < 0 || y >= SCREEN_HEIGHT) return;
+    int x0 = x < 0 ? 0 : x;
+    int x1 = (x + w) > SCREEN_WIDTH ? SCREEN_WIDTH : (x + w);
+    if (x1 <= x0) return;
+    memset(&frame_back[y * SCREEN_WIDTH + x0], color, x1 - x0);
+}
+
+// ============================================================
+// draw_vline
+// Vertical line
+// ============================================================
+void draw_vline(int x, int y, int h, uint8_t color) {
+    if (x < 0 || x >= SCREEN_WIDTH) return;
+    int y0 = y < 0 ? 0 : y;
+    int y1 = (y + h) > SCREEN_HEIGHT ? SCREEN_HEIGHT : (y + h);
+    for (int row = y0; row < y1; row++) {
+        frame_back[row * SCREEN_WIDTH + x] = color;
+    }
+}
+
+// ============================================================
+// draw_line
+// Arbitrary line between two points using Bresenham's algorithm
+// ============================================================
+void draw_line(int x0, int y0, int x1, int y1, uint8_t color) {
+    int dx  =  (x1 > x0 ? x1 - x0 : x0 - x1);
+    int dy  = -(y1 > y0 ? y1 - y0 : y0 - y1);
+    int sx  = x0 < x1 ? 1 : -1;
+    int sy  = y0 < y1 ? 1 : -1;
+    int err = dx + dy;
+
+    while (1) {
+        draw_pixel(x0, y0, color);
+        if (x0 == x1 && y0 == y1) break;
+        int e2 = 2 * err;
+        if (e2 >= dy) { err += dy; x0 += sx; }
+        if (e2 <= dx) { err += dx; y0 += sy; }
+    }
+}
+
+// ============================================================
+// draw_circle
+// Circle outline using Bresenham's midpoint algorithm
+// ============================================================
+void draw_circle(int cx, int cy, int r, uint8_t color) {
+    int x = 0, y = r, d = 1 - r;
+    while (x <= y) {
+        draw_pixel(cx + x, cy + y, color);
+        draw_pixel(cx - x, cy + y, color);
+        draw_pixel(cx + x, cy - y, color);
+        draw_pixel(cx - x, cy - y, color);
+        draw_pixel(cx + y, cy + x, color);
+        draw_pixel(cx - y, cy + x, color);
+        draw_pixel(cx + y, cy - x, color);
+        draw_pixel(cx - y, cy - x, color);
+        if (d < 0) d += 2 * x + 3;
+        else { d += 2 * (x - y) + 5; y--; }
+        x++;
+    }
+}
+
+// ============================================================
+// draw_circle_filled
+// Filled circle - draws horizontal spans between circle edges
+// ============================================================
+void draw_circle_filled(int cx, int cy, int r, uint8_t color) {
+    int x = 0, y = r, d = 1 - r;
+    while (x <= y) {
+        draw_hline(cx - x, cy + y, x * 2 + 1, color);
+        draw_hline(cx - x, cy - y, x * 2 + 1, color);
+        draw_hline(cx - y, cy + x, y * 2 + 1, color);
+        draw_hline(cx - y, cy - x, y * 2 + 1, color);
+        if (d < 0) d += 2 * x + 3;
+        else { d += 2 * (x - y) + 5; y--; }
+        x++;
+    }
+}
+
+// ============================================================
+// draw_sprite
+// Copy a raw w*h pixel array into the back buffer at (x, y)
+// ============================================================
+void draw_sprite(int x, int y, int w, int h, const uint8_t *data) {
+    for (int row = 0; row < h; row++) {
+        int screen_y = y + row;
+        if (screen_y < 0 || screen_y >= SCREEN_HEIGHT) continue;
+        for (int col = 0; col < w; col++) {
+            int screen_x = x + col;
+            if (screen_x < 0 || screen_x >= SCREEN_WIDTH) continue;
+            frame_back[screen_y * SCREEN_WIDTH + screen_x] = data[row * w + col];
+        }
+    }
+}
+
+// ============================================================
+// draw_sprite_transparent
+// Same as draw_sprite but skips pixels matching transparent_color
+// ============================================================
+void draw_sprite_transparent(int x, int y, int w, int h,
+                              const uint8_t *data, uint8_t transparent_color) {
+    for (int row = 0; row < h; row++) {
+        int screen_y = y + row;
+        if (screen_y < 0 || screen_y >= SCREEN_HEIGHT) continue;
+        for (int col = 0; col < w; col++) {
+            int screen_x = x + col;
+            if (screen_x < 0 || screen_x >= SCREEN_WIDTH) continue;
+            uint8_t pixel = data[row * w + col];
+            if (pixel != transparent_color) {
+                frame_back[screen_y * SCREEN_WIDTH + screen_x] = pixel;
+            }
+        }
+    }
+}
+
+// ============================================================
+// draw_char
+// Draw one ASCII character at (x, y) using the 8x8 bitmap font
+// ============================================================
+void draw_char(int x, int y, char c, uint8_t color) {
+    if (c < 32 || c > 127) return;
+    const uint8_t *glyph = font_data[c - 32];
+    for (int row = 0; row < 8; row++) {
+        uint8_t bits = glyph[row];
+        for (int col = 0; col < 8; col++) {
+            if (bits & (0x80 >> col)) {
+                draw_pixel(x + col, y + row, color);
+            }
+        }
+    }
+}
+
+// ============================================================
+// draw_string
+// Draw a null-terminated string starting at (x, y)
+// Characters are 8 pixels wide with 1 pixel spacing
+// ============================================================
+void draw_string(int x, int y, const char *str, uint8_t color) {
+    int cursor_x = x;
+    while (*str) {
+        if (*str == '\n') {
+            cursor_x = x;
+            y += 9; // 8 pixels tall + 1 pixel gap
+        } else {
+            draw_char(cursor_x, y, *str, color);
+            cursor_x += 9; // 8 pixels wide + 1 pixel gap
+        }
+        str++;
+    }
+}
