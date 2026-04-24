@@ -8,6 +8,10 @@
 
 #define DOCK_DETECT_PIN 11
 
+#ifndef DVI_DETECT_ACTIVE_LOW
+#define DVI_DETECT_ACTIVE_LOW 0
+#endif
+
 #define DVI_H_FRONT_PORCH 16
 #define DVI_H_SYNC_WIDTH 96
 #define DVI_H_BACK_PORCH 48
@@ -28,7 +32,9 @@ void dvi_set_display_buffer(uint8_t *buf);
 bool dvi_vsync_occurred(void);
 
 // Screen-detect input (HPD/dock detect) on DOCK_DETECT_PIN.
-// Returns true when a display is present.
+// Returns the current raw GPIO state (before polarity mapping).
+bool dvi_screen_connected_raw(void);
+// Returns true when a display is present (after polarity mapping).
 bool dvi_screen_connected(void);
 
 #endif 

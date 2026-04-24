@@ -184,6 +184,7 @@ void dvi_start(void) {
     dma_pong = false;
     vactive_cmdlist_posted = false;
     vsync_flag = false;
+    irq_set_enabled(DMA_IRQ_0, true);
     dma_channel_start(DMACH_PING);
 }
 
@@ -203,4 +204,9 @@ bool dvi_vsync_occurred(void) {
         return true;
     }
     return false;
+}
+
+bool dvi_screen_connected(void) {
+    // Active-high detect input (HPD/dock detect).
+    return gpio_get(DOCK_DETECT_PIN);
 }
